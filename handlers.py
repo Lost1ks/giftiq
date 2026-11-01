@@ -55,7 +55,7 @@ async def cmd_start(m: Message, command: CommandObject):
         'Что умею:\n'
         '• Показать стоимость всей коллекции\n'
         '• Отслеживать цены на tonnel и mrkt\n'
-        '• Генерировать красивую карточку для сторис\n'
+        '• Генерировать карточку и анимацию для сторис\n'
         '• Присылать уведомления о колебаниях (премиум)\n\n'
         '🔥 <b>Бонус:</b> открой <b>БЕСПЛАТНЫЙ кейс</b> с NFT подарками TON — '
         'они сразу выводятся на твой кошелёк. Жми кнопку ниже.\n\n'
@@ -130,12 +130,12 @@ async def show_portfolio(m, user_id):
         lines.append(f'... и ещё {len(gifts) - 20}')
     rub_s = f'{int(total_rub):,}'.replace(',', ' ')
     lines.append(f'\nВсего: <b>{total_ton:.2f} TON</b> (~{rub_s} rub)')
-   kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text='📸 Карточка (фото)', callback_data='share_card'),
-     InlineKeyboardButton(text='🎬 Анимация', callback_data='share_gif')],
-    [InlineKeyboardButton(text='🎁 БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
-    [InlineKeyboardButton(text='💰 Продать на MRKT', url='https://t.me/mrkt')],
-])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='📸 Карточка (фото)', callback_data='share_card'),
+         InlineKeyboardButton(text='🎬 Анимация', callback_data='share_gif')],
+        [InlineKeyboardButton(text='🎁 БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
+        [InlineKeyboardButton(text='💰 Продать на MRKT', url='https://t.me/mrkt')],
+    ])
     await m.answer('\n'.join(lines), reply_markup=kb)
 
 
@@ -155,6 +155,7 @@ async def cb_share(c: CallbackQuery):
     )
     await c.answer()
 
+
 @router.callback_query(F.data == 'share_gif')
 async def cb_share_gif(c: CallbackQuery):
     gifts = await storage.gifts_list(c.from_user.id)
@@ -170,6 +171,7 @@ async def cb_share_gif(c: CallbackQuery):
         BufferedInputFile(buf.getvalue(), filename='collection.gif'),
         caption=f'🎬 моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
     )
+
 
 @router.callback_query(F.data == 'premium_info')
 async def cb_premium_info(c: CallbackQuery):
