@@ -51,25 +51,24 @@ async def cmd_start(m: Message, command: CommandObject):
         ref
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='➕ Добавить подарок', callback_data='add_gift')],
-        [InlineKeyboardButton(text='📊 Моё портфолио', callback_data='portfolio')],
-        [InlineKeyboardButton(text='🎁 Бесплатный кейс Epic Gift', url=epic_gift_link())],
-        [InlineKeyboardButton(text='💱 xRocket P2P (продать подарки)', url=xrocket_link())],
-        [InlineKeyboardButton(text='💎 Премиум', callback_data='premium_info')],
-        [InlineKeyboardButton(text='👥 Пригласить друга', callback_data='ref_show')],
+        [InlineKeyboardButton(text='Добавить подарок', callback_data='add_gift')],
+        [InlineKeyboardButton(text='Моё портфолио', callback_data='portfolio')],
+        [InlineKeyboardButton(text='Бесплатный кейс Epic Gift', url=epic_gift_link())],
+        [InlineKeyboardButton(text='xRocket P2P (продать подарки)', url=xrocket_link())],
+        [InlineKeyboardButton(text='Премиум', callback_data='premium_info')],
+        [InlineKeyboardButton(text='Пригласить друга', callback_data='ref_show')],
     ])
-        await m.answer(
-        '<b>💎 GiftIQ</b> — портфолио-трекер TG подарков\n\n'
+    await m.answer(
+        '<b>GiftIQ</b> — портфолио-трекер TG подарков\n\n'
         'Что умею:\n'
         '• Показать стоимость всей коллекции\n'
         '• Отслеживать цены на tonnel и mrkt\n'
         '• Генерировать карточку и анимацию для сторис\n'
         '• Присылать уведомления о колебаниях (премиум)\n\n'
-        '🔥 <b>Бонус дня:</b> открой <b>БЕСПЛАТНЫЙ кейс</b> в Epic Gift — '
-        'реальные NFT подарки TON сразу на твой кошелёк.\n\n'
-        '⏰ <b>Кейс обновляется каждые 24 часа!</b> Приходи каждый день и '
-        'забирай новый подарок бесплатно.\n\n'
-        'Начни с <b>«Добавить подарок»</b>',
+        'Бонус дня: открой БЕСПЛАТНЫЙ кейс в Epic Gift. '
+        'Реальные NFT подарки TON сразу на твой кошелёк.\n\n'
+        'Кейс обновляется каждые 24 часа. Приходи каждый день.\n\n'
+        'Начни с «Добавить подарок»',
         reply_markup=kb
     )
 
@@ -77,10 +76,10 @@ async def cmd_start(m: Message, command: CommandObject):
 @router.callback_query(F.data == 'add_gift')
 async def cb_add(c: CallbackQuery):
     await c.message.answer(
-        'Пришли мне <b>ссылку на подарок</b>:\n'
+        'Пришли мне ссылку на подарок:\n'
         '<code>https://t.me/nft/SnoopDogg-471247</code>\n\n'
-        'Где взять: открой подарок в своём профиле → '
-        'три точки → <b>Share</b> → копируй ссылку'
+        'Где взять: открой подарок в своём профиле, '
+        'три точки, Share, копируй ссылку'
     )
     await c.answer()
 
@@ -132,7 +131,7 @@ async def show_portfolio(m, user_id):
         return await m.answer('Твоя коллекция пустая. /start → «Добавить подарок»')
     total_ton = sum(g['last_price_ton'] or 0 for g in gifts)
     total_rub = total_ton * RUB_PER_TON
-    lines = ['<b>💎 Твоя коллекция</b>\n']
+    lines = ['<b>Твоя коллекция</b>\n']
     for g in gifts[:20]:
         p = g['last_price_ton'] or 0
         lines.append(f'• <b>{g["name"]} #{g["number"]}</b> — {p:.2f} TON')
@@ -141,11 +140,11 @@ async def show_portfolio(m, user_id):
     rub_s = f'{int(total_rub):,}'.replace(',', ' ')
     lines.append(f'\nВсего: <b>{total_ton:.2f} TON</b> (~{rub_s} rub)')
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='📸 Карточка (фото)', callback_data='share_card'),
-         InlineKeyboardButton(text='🎬 Анимация', callback_data='share_gif')],
-        [InlineKeyboardButton(text='🎁 БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
-        [InlineKeyboardButton(text='💱 Продать на xRocket (P2P)', url=xrocket_link())],
-        [InlineKeyboardButton(text='💰 Продать на MRKT', url='https://t.me/mrkt')],
+        [InlineKeyboardButton(text='Карточка (фото)', callback_data='share_card'),
+         InlineKeyboardButton(text='Анимация', callback_data='share_gif')],
+        [InlineKeyboardButton(text='БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
+        [InlineKeyboardButton(text='Продать на xRocket (P2P)', url=xrocket_link())],
+        [InlineKeyboardButton(text='Продать на MRKT', url='https://t.me/mrkt')],
     ])
     await m.answer('\n'.join(lines), reply_markup=kb)
 
@@ -162,7 +161,7 @@ async def cb_share(c: CallbackQuery):
     )
     await c.message.answer_photo(
         BufferedInputFile(buf.getvalue(), filename='collection.png'),
-        caption=f'💎 моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
+        caption=f'моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
     )
     await c.answer()
 
@@ -180,22 +179,22 @@ async def cb_share_gif(c: CallbackQuery):
     )
     await c.message.answer_animation(
         BufferedInputFile(buf.getvalue(), filename='collection.gif'),
-        caption=f'🎬 моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
+        caption=f'моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
     )
 
 
 @router.callback_query(F.data == 'premium_info')
 async def cb_premium_info(c: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=f'💎 Купить за {PREMIUM_PRICE}⭐', callback_data='premium_buy')
+        InlineKeyboardButton(text=f'Купить за {PREMIUM_PRICE} звёзд', callback_data='premium_buy')
     ]])
     await c.message.answer(
-        f'<b>💎 Premium — {PREMIUM_PRICE}⭐/мес</b>\n\n'
-        '• 🔔 Push о колебаниях ±10%\n'
-        '• 📊 Расширенная аналитика редкости\n'
-        '• 💡 AI-инсайты\n'
-        '• 📄 PDF-отчёт\n'
-        '• 🎯 Алерты по целевой цене',
+        f'<b>Premium — {PREMIUM_PRICE} звёзд/мес</b>\n\n'
+        '• Push о колебаниях ±10%\n'
+        '• Расширенная аналитика редкости\n'
+        '• AI-инсайты\n'
+        '• PDF-отчёт\n'
+        '• Алерты по целевой цене',
         reply_markup=kb
     )
     await c.answer()
@@ -224,7 +223,7 @@ async def paid(m: Message):
     await storage.payment_record(m.from_user.id, sp.total_amount, sp.invoice_payload)
     if sp.invoice_payload == 'premium_month':
         until = await storage.premium_grant(m.from_user.id, 30)
-        await m.answer(f'✅ Премиум активен до {time.strftime("%d.%m.%Y", time.localtime(until))}')
+        await m.answer(f'Премиум активен до {time.strftime("%d.%m.%Y", time.localtime(until))}')
 
 
 @router.callback_query(F.data == 'ref_show')
@@ -232,7 +231,7 @@ async def cb_ref(c: CallbackQuery):
     me = await c.bot.me()
     link = f'https://t.me/{me.username}?start=ref{c.from_user.id}'
     await c.message.answer(
-        f'👥 <b>Твоя реф-ссылка</b>:\n<code>{link}</code>\n\n'
+        f'<b>Твоя реф-ссылка</b>:\n<code>{link}</code>\n\n'
         'За каждого приглашённого друга — <b>+7 дней Premium</b>'
     )
     await c.answer()
@@ -244,9 +243,9 @@ async def cmd_stats(m: Message):
         return
     s = await storage.stats_get()
     await m.answer(
-        f'📊 Статистика:\n'
-        f'👥 Юзеров: {s["users"]}\n'
-        f'💎 Премиум: {s["premium"]}\n'
-        f'⭐ Stars 24ч: {s["stars_24h"]}\n'
-        f'🎁 Подарков в базе: {s["gifts"]}'
+        f'Статистика:\n'
+        f'Юзеров: {s["users"]}\n'
+        f'Премиум: {s["premium"]}\n'
+        f'Stars 24ч: {s["stars_24h"]}\n'
+        f'Подарков в базе: {s["gifts"]}'
     )
