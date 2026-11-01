@@ -1,57 +1,21 @@
-import httpx
+import asyncio
+import json
 import logging
 import re
-import asyncio
-import random
+import time
+
+import httpx
+
+from config import RUB_PER_TON
 
 log = logging.getLogger('markets')
 
-# Floor-prices для топ подарков TG (ноябрь 2026)
-# значения обновляются раз в день, случайный разброс ±5%
-GIFT_FLOOR_TON = {
-    'PlushPepe':        450.0,
-    'DurovsCap':        180.0,
-    'PreciousPeach':    120.0,
-    'GemSignet':        95.0,
-    'IonGem':           75.0,
-    'LoliPop':          60.0,
-    'MadPumpkin':       45.0,
-    'ElectricSkull':    40.0,
-    'BondedRing':       32.0,
-    'DiamondRing':      28.0,
-    'SignetRing':       25.0,
-    'LunarSnake':       22.0,
-    'MagicPotion':      18.0,
-    'ScaredCat':        15.0,
-    'HeartLocket':      14.0,
-    'NailBracelet':     12.0,
-    'EvilEye':          10.0,
-    'EternalCandle':    8.5,
-    'TopHat':           7.0,
-    'EvilCrown':        6.5,
-    'SnakeBox':         5.5,
-    'TrapCard':         4.8,
-    'SharpTongue':      4.2,
-    'LolPop':           3.8,
-    'Homemade Cake':    3.5,
-    'SnoopDogg':        1.8,
-    'SwissWatch':       1.5,
-    'TelegramPremium':  1.2,
-    'JinglyBerry':      1.0,
-    'CookieHeart':      0.9,
-    'EasterEgg':        0.8,
-    'HexPot':           0.7,
-    'JellyBunny':       0.6,
-    'LoveCandle':       0.5,
-    'LovePotion':       0.5,
-    'Toy':              0.5,
-    'JackInTheBox':     0.5,
-    'LunarPanda':       0.5,
-    'PartySparkler':    0.4,
-    'SharpSmile':       0.4,
-    'Vintage':          0.4,
-    'SpyAgaric':        0.3,
-}
+PORTALS_API = 'https://portal-market.com/api'
+TONNEL_API = 'https://gifts2.tonnel.network/api/pageGifts'
+TONAPI_RATES = 'https://tonapi.io/v2/rates?tokens=ton&currencies=rub'
+
+PORTALS_TTL = 600     # floor-цены всех коллекций обновляем раз в 10 минут
+RATE_TTL = 3600       # курс TON → ₽ раз в час
 
 CHROME_HEADERS = {
     'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -59,88 +23,138 @@ CHROME_HEADERS = {
                    'Chrome/121.0.0.0 Safari/537.36'),
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
     'Origin': 'https://tonnel.network',
     'Referer': 'https://tonnel.network/',
-    'Sec-Ch-Ua': '"Chromium";v="121", "Not A(Brand";v="99"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-site',
 }
+
+_portals_cache = {'at': 0.0, 'data': {}}
+_rate_cache = {'at': 0.0, 'rub': RUB_PER_TON}
+_portals_lock = asyncio.Lock()
+
+
+def collection_key(slug: str) -> str:
+    """SnoopDogg-471247 / Snoop Dogg / Durov’s Cap -> snoopdogg / durovscap"""
+    return re.sub(r'[^a-z0-9]', '', re.sub(r'-\d+$', '', slug).lower())
 
 
 def _slug_to_name(slug: str) -> str:
-    name = re.sub(r'([A-Z])', r' \1', slug).strip()
-    return name
+    return re.sub(r'([A-Z])', r' \1', slug).strip()
 
 
-def _hardcoded_floor(slug: str):
-    base = GIFT_FLOOR_TON.get(slug)
-    if base is None:
-        return None
-    jitter = random.uniform(-0.05, 0.05)
-    price = round(base * (1 + jitter), 2)
-    return price
+async def portals_collections():
+    """{key: {'name': 'Durov’s Cap', 'floor': 421.0}} по всем коллекциям Portals."""
+    async with _portals_lock:
+        if time.time() - _portals_cache['at'] < PORTALS_TTL and _portals_cache['data']:
+            return _portals_cache['data']
+        data = {}
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                offset = 0
+                while offset < 2000:
+                    r = await c.get(f'{PORTALS_API}/collections',
+                                    params={'limit': 100, 'offset': offset},
+                                    headers={'User-Agent': CHROME_HEADERS['User-Agent']})
+                    r.raise_for_status()
+                    cols = r.json().get('collections') or []
+                    for col in cols:
+                        key = col.get('short_name') or collection_key(col.get('name', ''))
+                        try:
+                            floor = float(col.get('floor_price') or 0)
+                        except ValueError:
+                            floor = 0.0
+                        data[key] = {'name': col.get('name') or key, 'floor': floor}
+                    if len(cols) < 100:
+                        break
+                    offset += 100
+        except Exception as e:
+            log.warning(f'portals collections: {e}')
+        if data:
+            _portals_cache.update(at=time.time(), data=data)
+            log.info(f'portals: {len(data)} коллекций')
+        return _portals_cache['data']
 
 
-async def tonnel_floor(gift_slug: str):
-    name = _slug_to_name(gift_slug)
+async def portals_floor(key: str):
+    col = (await portals_collections()).get(key)
+    if col and col['floor'] > 0:
+        return round(col['floor'], 2)
+    return None
+
+
+async def tonnel_floor(name: str):
+    flt = {
+        'price': {'$exists': True},
+        'refund': {'$ne': True},
+        'buyer': {'$exists': False},
+        'export_at': {'$exists': True},
+        'gift_name': name.replace('’', "'"),
+        'asset': 'TON',
+    }
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
-            r = await c.post(
-                'https://gifts2.tonnel.network/api/pageGifts',
-                json={
-                    'page': 1,
-                    'limit': 1,
-                    'sort': '{"price":1,"gift_id":-1}',
-                    'filter': (
-                        '{"price":{"$exists":true},"refund":false,'
-                        '"buyer":{"$exists":false},'
-                        '"export_at":{"$exists":true},'
-                        '"asset":"TON",'
-                        f'"gift_name":"{name}"'
-                        '}'
-                    ),
-                    'price_range': None,
-                    'user_auth': ''
-                },
-                headers=CHROME_HEADERS
-            )
-            log.info(f'tonnel status={r.status_code} for name="{name}"')
-            if r.status_code == 200:
-                data = r.json()
-                items = data if isinstance(data, list) else []
-                if items:
-                    price = float(items[0].get('price', 0))
-                    if price > 0:
-                        log.info(f'tonnel floor {name} = {price} TON')
-                        return price, 'tonnel'
+            r = await c.post(TONNEL_API, json={
+                'page': 1, 'limit': 1,
+                'sort': '{"price":1,"gift_id":-1}',
+                'filter': json.dumps(flt),
+                'price_range': None, 'user_auth': '',
+            }, headers=CHROME_HEADERS)
+        items = r.json() if r.status_code == 200 and 'json' in r.headers.get('content-type', '') else None
+        log.info(f'tonnel "{name}": status={r.status_code} items={len(items) if isinstance(items, list) else "-"}')
+        if isinstance(items, list) and items:
+            price = float(items[0].get('price') or 0)
+            if price > 0:
+                return round(price, 2)
     except Exception as e:
-        log.warning(f'tonnel_floor {name}: {e}')
-    return None, None
+        log.warning(f'tonnel "{name}": {e}')
+    return None
 
 
-async def get_floor(gift_slug: str):
-    # Сначала пробуем реальный API
-    real = await tonnel_floor(gift_slug)
-    if real[0] and real[0] > 0:
-        return real
-    # Fallback на hardcoded таблицу
-    price = _hardcoded_floor(gift_slug)
-    if price:
-        log.info(f'floor fallback {gift_slug} = {price} TON (hardcoded)')
-        return price, 'market_avg'
-    log.info(f'floor unknown {gift_slug}')
-    return None, None
+async def get_quotes(slug: str):
+    """Цены коллекции на всех доступных маркетах.
+    -> {'key', 'name', 'prices': {'portals': 5.57, 'tonnel': 5.2}}"""
+    key = collection_key(slug)
+    cols = await portals_collections()
+    name = cols.get(key, {}).get('name') or _slug_to_name(slug.split('-')[0])
+    p_portals, p_tonnel = await asyncio.gather(portals_floor(key), tonnel_floor(name))
+    prices = {m: p for m, p in (('portals', p_portals), ('tonnel', p_tonnel)) if p}
+    return {'key': key, 'name': name, 'prices': prices}
+
+
+async def get_floor(slug: str):
+    """Минимальная цена среди маркетов: (price, market) или (None, None)."""
+    q = await get_quotes(slug)
+    if not q['prices']:
+        log.info(f'floor unknown {slug}')
+        return None, None
+    market = min(q['prices'], key=q['prices'].get)
+    return q['prices'][market], market
+
+
+async def ton_rub() -> float:
+    if time.time() - _rate_cache['at'] < RATE_TTL:
+        return _rate_cache['rub']
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(TONAPI_RATES)
+            rub = float(r.json()['rates']['TON']['prices']['RUB'])
+            if rub > 0:
+                _rate_cache.update(at=time.time(), rub=rub)
+    except Exception as e:
+        log.warning(f'курс TON: {e}')
+        _rate_cache['at'] = time.time() - RATE_TTL + 300  # повторим через 5 минут
+    return _rate_cache['rub']
+
+
+async def top_collections(n=5):
+    cols = await portals_collections()
+    return sorted(((c['name'], c['floor']) for c in cols.values() if c['floor'] > 0),
+                  key=lambda x: -x[1])[:n]
 
 
 def parse_gift_url(url: str):
-    m = re.match(r'https?://t\.me/nft/([A-Za-z0-9]+)-(\d+)', url)
+    m = re.search(r't\.me/nft/([A-Za-z0-9]+)-(\d+)', url)
     if not m:
         return None
     slug_name = m.group(1)
     number = int(m.group(2))
-    name = _slug_to_name(slug_name)
-    return {'slug': f'{slug_name}-{number}', 'name': name, 'number': number}
+    return {'slug': f'{slug_name}-{number}', 'name': _slug_to_name(slug_name), 'number': number}

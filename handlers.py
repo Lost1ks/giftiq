@@ -1,22 +1,33 @@
-import time
-import re
+import asyncio
 import base64
+import html
+import logging
+import re
+import time
 
 import httpx
 
 from aiogram import Router, F
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
                            InlineKeyboardButton, LabeledPrice, PreCheckoutQuery,
-                           BufferedInputFile)
+                           BufferedInputFile, ErrorEvent)
 from aiogram.filters import Command, CommandObject
 
-from config import (ADMIN_USER_ID, TONNEL_REF, EPIC_GIFT_REF, XROCKET_REF,
-                    GEMINI_API_KEY, PREMIUM_PRICE, ART_PRICE, RUB_PER_TON)
+from config import (ADMIN_USER_ID, TONNEL_REF, EPIC_GIFT_REF, XROCKET_REF, CHANNEL_URL,
+                    GEMINI_API_KEY, GEMINI_IMAGE_MODEL, CF_ACCOUNT_ID, CF_API_TOKEN,
+                    PREMIUM_PRICE, ART_PRICE, REF_BONUS_DAYS)
 import storage
 import markets
 import render
+import jobs
 
+log = logging.getLogger('handlers')
 router = Router()
+
+GIFT_LINK_RE = r't\.me/nft/[A-Za-z0-9]+-\d+'
+MARKET_NAMES = {'portals': 'Portals', 'tonnel': 'Tonnel'}
+REFRESH_COOLDOWN = 60
+_last_refresh = {}
 
 
 def tonnel_link():
@@ -39,31 +50,98 @@ def xrocket_link():
     return 'https://t.me/xrocket'
 
 
+def rub_fmt(ton: float, rate: float) -> str:
+    return f'{int(ton * rate):,}'.replace(',', ' ')
+
+
+def market_name(m):
+    return MARKET_NAMES.get(m, 'нет данных')
+
+
+ART_PAUSE = 600  # после неудачной генерации не продаём AI-арт 10 минут
+_art_state = {'down_until': 0.0}
+
+
+def art_available():
+    configured = bool(GEMINI_API_KEY or (CF_ACCOUNT_ID and CF_API_TOKEN))
+    return configured and time.time() >= _art_state['down_until']
+
+
 async def gemini_generate_image(prompt: str):
     if not GEMINI_API_KEY:
         return None
-    url = (
-        'https://generativelanguage.googleapis.com/v1beta/models/'
-        'gemini-2.5-flash-image-preview:generateContent'
-        f'?key={GEMINI_API_KEY}'
-    )
+    url = ('https://generativelanguage.googleapis.com/v1beta/models/'
+           f'{GEMINI_IMAGE_MODEL}:generateContent')
     try:
         async with httpx.AsyncClient(timeout=90) as c:
-            r = await c.post(url, json={
+            r = await c.post(url, headers={'x-goog-api-key': GEMINI_API_KEY}, json={
                 'contents': [{'parts': [{'text': prompt}]}],
                 'generationConfig': {'responseModalities': ['TEXT', 'IMAGE']}
             })
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            for cand in data.get('candidates', []):
-                for part in cand.get('content', {}).get('parts', []):
-                    inline = part.get('inlineData') or part.get('inline_data')
-                    if inline and inline.get('data'):
-                        return base64.b64decode(inline['data'])
-    except Exception:
-        return None
+        if r.status_code != 200:
+            log.warning(f'gemini {GEMINI_IMAGE_MODEL}: HTTP {r.status_code} {r.text[:300]}')
+            return None
+        for cand in r.json().get('candidates', []):
+            for part in (cand.get('content') or {}).get('parts', []):
+                inline = part.get('inlineData') or part.get('inline_data')
+                if inline and inline.get('data'):
+                    return base64.b64decode(inline['data'])
+        log.warning('gemini: ответ без картинки')
+    except Exception as e:
+        log.warning(f'gemini: {e}')
     return None
+
+
+async def cloudflare_generate_image(prompt: str):
+    if not (CF_ACCOUNT_ID and CF_API_TOKEN):
+        return None
+    url = (f'https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}'
+           '/ai/run/@cf/black-forest-labs/flux-1-schnell')
+    try:
+        async with httpx.AsyncClient(timeout=90) as c:
+            r = await c.post(url, headers={'Authorization': f'Bearer {CF_API_TOKEN}'},
+                             json={'prompt': prompt, 'steps': 8})
+        if r.status_code != 200:
+            log.warning(f'cloudflare flux: HTTP {r.status_code} {r.text[:300]}')
+            return None
+        return base64.b64decode(r.json()['result']['image'])
+    except Exception as e:
+        log.warning(f'cloudflare flux: {e}')
+    return None
+
+
+async def generate_image(prompt: str):
+    img = await gemini_generate_image(prompt) or await cloudflare_generate_image(prompt)
+    # генератор не работает (нет квоты/ключа) — временно не берём звёзды за AI-арт
+    _art_state['down_until'] = 0.0 if img else time.time() + ART_PAUSE
+    return img
+
+
+def main_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='Добавить подарок', callback_data='add_gift')],
+        [InlineKeyboardButton(text='Моё портфолио', callback_data='portfolio')],
+        [InlineKeyboardButton(text='Бесплатный кейс Epic Gift', url=epic_gift_link())],
+        [InlineKeyboardButton(text='xRocket P2P (продать подарки)', url=xrocket_link())],
+        [InlineKeyboardButton(text='AI-арт (генерация картинок)', callback_data='art_info')],
+        [InlineKeyboardButton(text='Премиум', callback_data='premium_info'),
+         InlineKeyboardButton(text='Пригласить друга', callback_data='ref_show')],
+        [InlineKeyboardButton(text='Канал GiftIQ News', url=CHANNEL_URL)],
+    ])
+
+
+WELCOME = (
+    '<b>GiftIQ</b> — портфолио-трекер TG подарков\n\n'
+    'Что умею:\n'
+    '• Показать стоимость всей коллекции в TON и ₽\n'
+    '• Отслеживать floor-цены на Portals и Tonnel\n'
+    '• Генерировать карточку и анимацию для сторис\n'
+    '• <b>AI-арт</b> — создавать уникальные картинки по описанию\n'
+    '• Присылать уведомления о колебаниях ±10% (премиум)\n\n'
+    'Бонус дня: открой БЕСПЛАТНЫЙ кейс в Epic Gift. '
+    'Кейс обновляется каждые 24 часа.\n\n'
+    'Начни с «Добавить подарок»'
+)
 
 
 @router.message(Command('start'))
@@ -72,36 +150,37 @@ async def cmd_start(m: Message, command: CommandObject):
     if command.args and command.args.startswith('ref'):
         try:
             ref = int(command.args[3:])
-        except Exception:
+        except ValueError:
             pass
-    await storage.user_upsert(
+    if ref == m.from_user.id:
+        ref = None
+    is_new = await storage.user_upsert(
         m.from_user.id,
         m.from_user.username or '',
         m.from_user.full_name,
         ref
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='Добавить подарок', callback_data='add_gift')],
-        [InlineKeyboardButton(text='Моё портфолио', callback_data='portfolio')],
-        [InlineKeyboardButton(text='Бесплатный кейс Epic Gift', url=epic_gift_link())],
-        [InlineKeyboardButton(text='xRocket P2P (продать подарки)', url=xrocket_link())],
-        [InlineKeyboardButton(text='AI-арт (генерация картинок)', callback_data='art_info')],
-        [InlineKeyboardButton(text='Премиум', callback_data='premium_info')],
-        [InlineKeyboardButton(text='Пригласить друга', callback_data='ref_show')],
-    ])
+    if is_new and ref and await storage.user_exists(ref):
+        until = await storage.premium_grant(ref, REF_BONUS_DAYS)
+        try:
+            await m.bot.send_message(
+                ref,
+                f'По твоей ссылке пришёл новый друг — <b>+{REF_BONUS_DAYS} дней Premium</b>.\n'
+                f'Premium активен до {time.strftime("%d.%m.%Y", time.localtime(until))}'
+            )
+        except Exception as e:
+            log.info(f'ref notify {ref}: {e}')
+    await m.answer(WELCOME, reply_markup=main_kb())
+
+
+@router.message(Command('help'))
+async def cmd_help(m: Message):
     await m.answer(
-        '<b>GiftIQ</b> — портфолио-трекер TG подарков\n\n'
-        'Что умею:\n'
-        '• Показать стоимость всей коллекции\n'
-        '• Отслеживать цены на tonnel и mrkt\n'
-        '• Генерировать карточку и анимацию для сторис\n'
-        '• <b>AI-арт</b> — создавать уникальные картинки по описанию\n'
-        '• Присылать уведомления о колебаниях (премиум)\n\n'
-        'Бонус дня: открой БЕСПЛАТНЫЙ кейс в Epic Gift. '
-        'Реальные NFT подарки TON сразу на твой кошелёк. '
-        'Кейс обновляется каждые 24 часа.\n\n'
-        'Начни с «Добавить подарок»',
-        reply_markup=kb
+        WELCOME + '\n\nКоманды:\n'
+        '/portfolio — моя коллекция\n'
+        '/makeart описание — AI-арт\n'
+        '/premium — премиум',
+        reply_markup=main_kb()
     )
 
 
@@ -116,32 +195,39 @@ async def cb_add(c: CallbackQuery):
     await c.answer()
 
 
-@router.message(F.text.regexp(r'https?://t\.me/nft/[A-Za-z0-9]+-\d+'))
+@router.message(F.text.regexp(GIFT_LINK_RE, mode='search'))
 async def handle_gift_link(m: Message):
-    url_match = re.search(r'https?://t\.me/nft/[A-Za-z0-9]+-\d+', m.text)
-    url = url_match.group(0)
+    url = re.search(GIFT_LINK_RE, m.text).group(0)
     parsed = markets.parse_gift_url(url)
     if not parsed:
-        return await m.answer('Не удалось распарсить ссылку')
-    await m.answer('Ищу цены на маркетах...')
-    price, market = await markets.get_floor(parsed['slug'].split('-')[0])
-    if not price:
+        return await m.answer('Не удалось распознать ссылку')
+    await storage.user_upsert(m.from_user.id, m.from_user.username or '', m.from_user.full_name)
+    wait = await m.answer('Ищу цены на маркетах...')
+    q = await markets.get_quotes(parsed['slug'])
+    if q['prices']:
+        market = min(q['prices'], key=q['prices'].get)
+        price = q['prices'][market]
+    else:
         price, market = 0.0, 'unknown'
     added = await storage.gift_add(
-        m.from_user.id, parsed['slug'], parsed['name'],
+        m.from_user.id, parsed['slug'], q['name'],
         parsed['number'], price, market
     )
     if not added:
-        return await m.answer('Этот подарок уже в твоей коллекции')
+        return await wait.edit_text('Этот подарок уже в твоей коллекции. /portfolio')
+    rate = await markets.ton_rub()
     if price:
-        rub = int(price * RUB_PER_TON)
-        price_text = f'{price:.2f} TON (~{rub} rub)'
+        per_market = '\n'.join(
+            f'• {MARKET_NAMES[mk]}: {q["prices"][mk]:.2f} TON' if mk in q['prices']
+            else f'• {MARKET_NAMES[mk]}: нет лотов' for mk in MARKET_NAMES
+        )
+        price_text = (f'Floor: <b>{price:.2f} TON</b> (~{rub_fmt(price, rate)} ₽)\n'
+                      f'{per_market}')
     else:
-        price_text = 'цена не найдена'
-    await m.answer(
-        f'Добавил: <b>{parsed["name"]} #{parsed["number"]}</b>\n'
-        f'Floor: {price_text}\n'
-        f'Источник: {market}\n\n'
+        price_text = 'Цена пока не найдена — обновлю автоматически, когда появятся лоты'
+    await wait.edit_text(
+        f'Добавил: <b>{html.escape(q["name"])} #{parsed["number"]}</b>\n'
+        f'{price_text}\n\n'
         '/portfolio — моя коллекция'
     )
 
@@ -160,56 +246,101 @@ async def cmd_portfolio(m: Message):
 async def show_portfolio(m, user_id):
     gifts = await storage.gifts_list(user_id)
     if not gifts:
-        return await m.answer('Твоя коллекция пустая. /start → «Добавить подарок»')
+        return await m.answer('Твоя коллекция пустая. Пришли ссылку на подарок или нажми /start → «Добавить подарок»')
+    rate = await markets.ton_rub()
     total_ton = sum(g['last_price_ton'] or 0 for g in gifts)
-    total_rub = total_ton * RUB_PER_TON
     lines = ['<b>Твоя коллекция</b>\n']
     for g in gifts[:20]:
         p = g['last_price_ton'] or 0
-        lines.append(f'• <b>{g["name"]} #{g["number"]}</b> — {p:.2f} TON')
+        price = f'{p:.2f} TON' if p else 'нет цены'
+        lines.append(f'• <b>{html.escape(g["name"])} #{g["number"]}</b> — {price}')
     if len(gifts) > 20:
         lines.append(f'... и ещё {len(gifts) - 20}')
-    rub_s = f'{int(total_rub):,}'.replace(',', ' ')
-    lines.append(f'\nВсего: <b>{total_ton:.2f} TON</b> (~{rub_s} rub)')
+    lines.append(f'\nВсего: <b>{total_ton:.2f} TON</b> (~{rub_fmt(total_ton, rate)} ₽)')
+    lines.append(f'<i>Floor-цены Portals/Tonnel, курс 1 TON ≈ {rate:.0f} ₽</i>')
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='Карточка (фото)', callback_data='share_card'),
          InlineKeyboardButton(text='Анимация', callback_data='share_gif')],
+        [InlineKeyboardButton(text='Обновить цены', callback_data='refresh'),
+         InlineKeyboardButton(text='Удалить подарок', callback_data='del_menu')],
         [InlineKeyboardButton(text='AI-арт', callback_data='art_info')],
         [InlineKeyboardButton(text='БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
         [InlineKeyboardButton(text='Продать на xRocket (P2P)', url=xrocket_link())],
-        [InlineKeyboardButton(text='Продать на MRKT', url='https://t.me/mrkt')],
+        [InlineKeyboardButton(text='Продать на Tonnel', url=tonnel_link()),
+         InlineKeyboardButton(text='Продать на MRKT', url='https://t.me/mrkt')],
     ])
     await m.answer('\n'.join(lines), reply_markup=kb)
 
 
-@router.callback_query(F.data == 'share_card')
-async def cb_share(c: CallbackQuery):
+@router.callback_query(F.data == 'refresh')
+async def cb_refresh(c: CallbackQuery):
+    left = REFRESH_COOLDOWN - (time.time() - _last_refresh.get(c.from_user.id, 0))
+    if left > 0:
+        return await c.answer(f'Цены уже обновлялись, подожди {int(left)} сек', show_alert=True)
+    _last_refresh[c.from_user.id] = time.time()
     gifts = await storage.gifts_list(c.from_user.id)
     if not gifts:
         return await c.answer('Коллекция пуста', show_alert=True)
+    await c.answer('Обновляю цены...')
+    await jobs.refresh_prices(None, [g['slug'] for g in gifts])
+    await show_portfolio(c.message, c.from_user.id)
+
+
+@router.callback_query(F.data == 'del_menu')
+async def cb_del_menu(c: CallbackQuery):
+    gifts = await storage.gifts_list(c.from_user.id)
+    if not gifts:
+        return await c.answer('Коллекция пуста', show_alert=True)
+    rows = [[InlineKeyboardButton(text=f'Удалить {g["name"]} #{g["number"]}',
+                                  callback_data=f'del:{g["slug"]}')] for g in gifts[:30]]
+    await c.message.answer('Какой подарок убрать из коллекции?',
+                           reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith('del:'))
+async def cb_del(c: CallbackQuery):
+    slug = c.data[4:]
+    if await storage.gift_remove(c.from_user.id, slug):
+        await c.answer('Удалено')
+        await c.message.edit_text(f'Удалил {html.escape(slug)} из коллекции. /portfolio')
+    else:
+        await c.answer('Такого подарка уже нет', show_alert=True)
+
+
+async def _collection_media(c: CallbackQuery):
+    gifts = await storage.gifts_list(c.from_user.id)
+    if not gifts:
+        await c.answer('Коллекция пуста', show_alert=True)
+        return None
+    rate = await markets.ton_rub()
     total_ton = sum(g['last_price_ton'] or 0 for g in gifts)
-    total_rub = total_ton * RUB_PER_TON
-    buf = render.collection_card(
-        c.from_user.username or 'anon', gifts, total_ton, total_rub
-    )
+    name = c.from_user.username or c.from_user.first_name or 'anon'
+    return name, gifts, total_ton, total_ton * rate, rate
+
+
+@router.callback_query(F.data == 'share_card')
+async def cb_share(c: CallbackQuery):
+    data = await _collection_media(c)
+    if not data:
+        return
+    name, gifts, total_ton, total_rub, _ = data
+    await c.answer('Рисую карточку...')
+    buf = await asyncio.to_thread(render.collection_card, name, gifts, total_ton, total_rub)
     await c.message.answer_photo(
         BufferedInputFile(buf.getvalue(), filename='collection.png'),
         caption=f'моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
     )
-    await c.answer()
 
 
 @router.callback_query(F.data == 'share_gif')
 async def cb_share_gif(c: CallbackQuery):
-    gifts = await storage.gifts_list(c.from_user.id)
-    if not gifts:
-        return await c.answer('Коллекция пуста', show_alert=True)
-    total_ton = sum(g['last_price_ton'] or 0 for g in gifts)
-    total_rub = total_ton * RUB_PER_TON
+    data = await _collection_media(c)
+    if not data:
+        return
+    name, gifts, total_ton, total_rub, rate = data
     await c.answer('Генерирую анимацию...')
-    buf = render.collection_gif(
-        c.from_user.username or 'anon', gifts, total_ton, total_rub
-    )
+    buf = await asyncio.to_thread(render.collection_gif, name, gifts, total_ton, total_rub, rate)
     await c.message.answer_animation(
         BufferedInputFile(buf.getvalue(), filename='collection.gif'),
         caption=f'моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
@@ -218,19 +349,22 @@ async def cb_share_gif(c: CallbackQuery):
 
 @router.callback_query(F.data == 'art_info')
 async def cb_art_info(c: CallbackQuery):
+    if not art_available():
+        await c.message.answer('AI-арт временно недоступен — скоро вернём. Звёзды за него сейчас не списываются.')
+        return await c.answer()
     credits = await storage.art_get(c.from_user.id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=f'Купить за {ART_PRICE} звёзд', callback_data='art_buy')
     ]])
     await c.message.answer(
         '<b>AI-арт</b> — уникальная картинка по твоему описанию.\n\n'
-        'Создана через Google Gemini, HD качество, под твой запрос. '
-        'Идеально для сторис, аватарок, подарков друзьям.\n\n'
+        'Подходит для сторис, аватарок, подарков друзьям.\n\n'
         f'Стоимость: <b>{ART_PRICE} звёзд</b> за одну генерацию\n'
-        f'У тебя сейчас: <b>{credits}</b> генераций\n\n'
+        f'У тебя сейчас: <b>{credits}</b> генераций\n'
+        'Если генерация не получится — она не спишется.\n\n'
         'После покупки — пиши:\n'
         '<code>/makeart описание картинки</code>\n\n'
-        'Примеры промптов:\n'
+        'Примеры:\n'
         '• /makeart neon diamond on dark background\n'
         '• /makeart открытка с драконом в стиле anime\n'
         '• /makeart абстрактный космос фиолетово-синий',
@@ -241,9 +375,11 @@ async def cb_art_info(c: CallbackQuery):
 
 @router.callback_query(F.data == 'art_buy')
 async def cb_art_buy(c: CallbackQuery):
+    if not art_available():
+        return await c.answer('AI-арт временно недоступен', show_alert=True)
     await c.message.answer_invoice(
         title='AI-арт генерация',
-        description='Создай уникальную картинку через AI',
+        description='Одна уникальная картинка по твоему описанию',
         payload='art_credit',
         currency='XTR',
         prices=[LabeledPrice(label='AI Art', amount=ART_PRICE)]
@@ -261,54 +397,65 @@ async def cmd_makeart(m: Message, command: CommandObject):
         )
     credits = await storage.art_get(m.from_user.id)
     if credits <= 0:
+        if not art_available():
+            return await m.answer('AI-арт временно недоступен.')
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=f'Купить за {ART_PRICE} звёзд', callback_data='art_buy')
         ]])
-        return await m.answer(
-            'У тебя 0 генераций. Купи одну за звёзды.',
-            reply_markup=kb
-        )
+        return await m.answer('У тебя 0 генераций. Купи одну за звёзды.', reply_markup=kb)
     msg = await m.answer('Генерирую картинку... (10-30 сек)')
-    img = await gemini_generate_image(prompt)
+    img = await generate_image(prompt)
     if not img:
         return await msg.edit_text(
-            'Не удалось сгенерировать. Попробуй другое описание.\n'
-            'Генерации не списались.'
+            'Не удалось сгенерировать. Попробуй другое описание чуть позже.\n'
+            'Генерация не списалась.'
         )
-    await storage.art_use(m.from_user.id)
+    if not await storage.art_use(m.from_user.id):
+        return await msg.edit_text('Генерации закончились. Купи ещё через /start → AI-арт')
     left = await storage.art_get(m.from_user.id)
+    await msg.delete()
     await m.answer_photo(
         BufferedInputFile(img, filename='art.png'),
         caption=(
-            f'<b>AI-арт по запросу:</b>\n<i>{prompt[:200]}</i>\n\n'
+            f'<b>AI-арт по запросу:</b>\n<i>{html.escape(prompt[:200])}</i>\n\n'
             f'Осталось генераций: {left}\n'
             f'Создано в @giftiq_tg_bot'
         )
     )
 
 
-@router.callback_query(F.data == 'premium_info')
-async def cb_premium_info(c: CallbackQuery):
+async def send_premium_info(m: Message, user_id: int):
+    until = await storage.premium_get(user_id)
+    status = (f'Твой Premium активен до <b>{time.strftime("%d.%m.%Y", time.localtime(until))}</b>\n\n'
+              if until > time.time() else '')
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=f'Купить за {PREMIUM_PRICE} звёзд', callback_data='premium_buy')
     ]])
-    await c.message.answer(
-        f'<b>Premium — {PREMIUM_PRICE} звёзд/мес</b>\n\n'
-        '• Push о колебаниях ±10%\n'
-        '• Расширенная аналитика редкости\n'
-        '• AI-инсайты\n'
-        '• PDF-отчёт\n'
-        '• Алерты по целевой цене',
+    await m.answer(
+        f'{status}<b>Premium — {PREMIUM_PRICE} звёзд/мес</b>\n\n'
+        '• Push-уведомления, когда floor твоих подарков меняется на ±10%\n'
+        '• Проверка цен каждые 30 минут на Portals и Tonnel\n'
+        f'• За каждого приглашённого друга — +{REF_BONUS_DAYS} дней бесплатно',
         reply_markup=kb
     )
+
+
+@router.callback_query(F.data == 'premium_info')
+async def cb_premium_info(c: CallbackQuery):
+    await send_premium_info(c.message, c.from_user.id)
     await c.answer()
+
+
+@router.message(Command('premium'))
+async def cmd_premium(m: Message):
+    await send_premium_info(m, m.from_user.id)
 
 
 @router.callback_query(F.data == 'premium_buy')
 async def cb_premium_buy(c: CallbackQuery):
     await c.message.answer_invoice(
         title='GiftIQ Premium',
-        description='Месяц безлимитных функций + push',
+        description='30 дней push-уведомлений о колебаниях цен',
         payload='premium_month',
         currency='XTR',
         prices=[LabeledPrice(label='Premium', amount=PREMIUM_PRICE)]
@@ -316,15 +463,25 @@ async def cb_premium_buy(c: CallbackQuery):
     await c.answer()
 
 
+EXPECTED_PRICES = {'premium_month': lambda: PREMIUM_PRICE, 'art_credit': lambda: ART_PRICE}
+
+
 @router.pre_checkout_query()
 async def pcq(q: PreCheckoutQuery):
+    expected = EXPECTED_PRICES.get(q.invoice_payload)
+    if q.currency != 'XTR' or not expected or q.total_amount != expected():
+        return await q.answer(ok=False, error_message='Счёт устарел. Открой покупку заново через /start')
+    if q.invoice_payload == 'art_credit' and not art_available():
+        return await q.answer(ok=False, error_message='AI-арт временно недоступен')
     await q.answer(ok=True)
 
 
 @router.message(F.successful_payment)
 async def paid(m: Message):
     sp = m.successful_payment
-    await storage.payment_record(m.from_user.id, sp.total_amount, sp.invoice_payload)
+    await storage.user_upsert(m.from_user.id, m.from_user.username or '', m.from_user.full_name)
+    await storage.payment_record(m.from_user.id, sp.total_amount, sp.invoice_payload,
+                                 sp.telegram_payment_charge_id)
     if sp.invoice_payload == 'premium_month':
         until = await storage.premium_grant(m.from_user.id, 30)
         await m.answer(f'Премиум активен до {time.strftime("%d.%m.%Y", time.localtime(until))}')
@@ -343,7 +500,7 @@ async def cb_ref(c: CallbackQuery):
     link = f'https://t.me/{me.username}?start=ref{c.from_user.id}'
     await c.message.answer(
         f'<b>Твоя реф-ссылка</b>:\n<code>{link}</code>\n\n'
-        'За каждого приглашённого друга — <b>+7 дней Premium</b>'
+        f'За каждого нового друга, который запустит бота по ссылке — <b>+{REF_BONUS_DAYS} дней Premium</b>'
     )
     await c.answer()
 
@@ -360,3 +517,24 @@ async def cmd_stats(m: Message):
         f'Stars 24ч: {s["stars_24h"]}\n'
         f'Подарков в базе: {s["gifts"]}'
     )
+
+
+@router.message(F.text & ~F.text.startswith('/'))
+async def fallback_text(m: Message):
+    await m.answer(
+        'Пришли ссылку на подарок вида\n<code>https://t.me/nft/SnoopDogg-471247</code>\n\n'
+        'или открой меню: /start',
+    )
+
+
+@router.errors()
+async def on_error(event: ErrorEvent):
+    log.exception(f'ошибка в обработчике: {event.exception}', exc_info=event.exception)
+    upd = event.update
+    try:
+        if upd.callback_query:
+            await upd.callback_query.answer('Что-то пошло не так, попробуй ещё раз', show_alert=True)
+        elif upd.message:
+            await upd.message.answer('Что-то пошло не так, попробуй ещё раз чуть позже')
+    except Exception:
+        pass

@@ -1,9 +1,14 @@
-import aiosqlite
+import os
 import time
+
+import aiosqlite
+
 from config import DB_PATH
 
 
 async def init_db():
+    if os.path.dirname(DB_PATH):
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript("""
         CREATE TABLE IF NOT EXISTS users (
@@ -41,15 +46,20 @@ async def init_db():
             paid_at INTEGER
         );
         """)
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN art_credits INTEGER DEFAULT 0")
-        except Exception:
-            pass
+        for ddl in ("ALTER TABLE users ADD COLUMN art_credits INTEGER DEFAULT 0",
+                    "ALTER TABLE payments ADD COLUMN charge_id TEXT"):
+            try:
+                await db.execute(ddl)
+            except Exception:
+                pass
         await db.commit()
 
 
 async def user_upsert(user_id, username, full_name, referred_by=None):
+    """Возвращает True, если пользователь новый."""
     async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)) as cur:
+            exists = await cur.fetchone() is not None
         await db.execute(
             "INSERT INTO users (user_id, username, full_name, referred_by, created_at) "
             "VALUES (?, ?, ?, ?, ?) "
@@ -57,6 +67,13 @@ async def user_upsert(user_id, username, full_name, referred_by=None):
             (user_id, username, full_name, referred_by, int(time.time()))
         )
         await db.commit()
+        return not exists
+
+
+async def user_exists(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)) as cur:
+            return await cur.fetchone() is not None
 
 
 async def gift_add(user_id, slug, name, number, price_ton, market):
@@ -71,6 +88,13 @@ async def gift_add(user_id, slug, name, number, price_ton, market):
             return True
         except aiosqlite.IntegrityError:
             return False
+
+
+async def gift_remove(user_id, slug):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM gifts WHERE user_id=? AND slug=?", (user_id, slug))
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def gifts_list(user_id):
@@ -88,29 +112,62 @@ async def gifts_list(user_id):
             ]
 
 
-async def gift_update_price(slug, price_ton, market):
+async def all_gift_slugs():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT DISTINCT slug FROM gifts") as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+async def price_get(slug):
+    """(price_ton, market) последней сохранённой цены или (0, None)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT price_ton, market FROM prices WHERE slug=?", (slug,)) as cur:
+            row = await cur.fetchone()
+    return (row[0] or 0, row[1]) if row else (0, None)
+
+
+async def gift_update_price(slug, price_ton, market, name=None):
+    now = int(time.time())
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO prices (slug, price_ton, market, updated_at) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(slug) DO UPDATE SET price_ton=?, market=?, updated_at=?",
-            (slug, price_ton, market, int(time.time()),
-             price_ton, market, int(time.time()))
+            "INSERT INTO prices (slug, price_ton, market, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(slug) DO UPDATE SET price_ton=excluded.price_ton, "
+            "market=excluded.market, updated_at=excluded.updated_at",
+            (slug, price_ton, market, now)
         )
         await db.execute(
-            "UPDATE gifts SET last_price_ton=?, last_market=? WHERE slug=?",
-            (price_ton, market, slug)
+            "UPDATE gifts SET last_price_ton=?, last_market=?, name=COALESCE(?, name) WHERE slug=?",
+            (price_ton, market, name, slug)
         )
         await db.commit()
 
 
-async def payment_record(user_id, stars, payload):
+async def premium_users_with_slug(slug):
+    """[(user_id, notify_pct)] премиум-пользователей, у которых есть этот подарок."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT u.user_id, COALESCE(u.notify_pct, 10) FROM gifts g "
+            "JOIN users u ON u.user_id = g.user_id "
+            "WHERE g.slug=? AND u.premium_until > ?",
+            (slug, int(time.time()))
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def payment_record(user_id, stars, payload, charge_id=None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO payments (user_id, stars, payload, paid_at) VALUES (?, ?, ?, ?)",
-            (user_id, stars, payload, int(time.time()))
+            "INSERT INTO payments (user_id, stars, payload, paid_at, charge_id) VALUES (?, ?, ?, ?, ?)",
+            (user_id, stars, payload, int(time.time()), charge_id)
         )
         await db.commit()
+
+
+async def premium_get(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT premium_until FROM users WHERE user_id=?", (user_id,)) as cur:
+            row = await cur.fetchone()
+    return (row[0] or 0) if row else 0
 
 
 async def premium_grant(user_id, days):
@@ -119,7 +176,7 @@ async def premium_grant(user_id, days):
             "SELECT premium_until FROM users WHERE user_id=?", (user_id,)
         ) as cur:
             row = await cur.fetchone()
-        current = row[0] if row else 0
+        current = (row[0] or 0) if row else 0
         base = max(current, int(time.time()))
         new_until = base + days * 86400
         await db.execute(
@@ -149,18 +206,14 @@ async def art_get(user_id):
 
 
 async def art_use(user_id):
+    """Атомарно списывает 1 генерацию. False — если генераций нет."""
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT COALESCE(art_credits,0) FROM users WHERE user_id=?", (user_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if not row or row[0] <= 0:
-            return False
-        await db.execute(
-            "UPDATE users SET art_credits = art_credits - 1 WHERE user_id=?", (user_id,)
+        cur = await db.execute(
+            "UPDATE users SET art_credits = art_credits - 1 "
+            "WHERE user_id=? AND COALESCE(art_credits,0) > 0", (user_id,)
         )
         await db.commit()
-        return True
+        return cur.rowcount > 0
 
 
 async def stats_get():

@@ -107,7 +107,7 @@ def _frame(bg1, bg2, accent, texts):
     return img
 
 
-def collection_gif(user_name: str, gifts: list, total_ton: float, total_rub: float):
+def collection_gif(user_name: str, gifts: list, total_ton: float, total_rub: float, rub_per_ton: float):
     W, H = 1080, 1920
     frames = []
     f_logo = _font(180, bold=True)
@@ -133,7 +133,7 @@ def collection_gif(user_name: str, gifts: list, total_ton: float, total_rub: flo
     for i, g in enumerate(gifts[:10]):
         c1, c2, accent = PALETTES[i % len(PALETTES)]
         price = g['last_price_ton'] or 0
-        rub_g = f'{int(price * 350):,}'.replace(',', ' ')
+        rub_g = f'{int(price * rub_per_ton):,}'.replace(',', ' ')
         name = (g['name'] or 'Gift')[:14]
         number = g['number'] or 0
         frame = _frame(c1, c2, accent, [
