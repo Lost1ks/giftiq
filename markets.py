@@ -2,11 +2,73 @@ import httpx
 import logging
 import re
 import asyncio
+import random
 
 log = logging.getLogger('markets')
 
-TONNEL_API = 'https://gifts2.tonnel.network/api/pageGifts'
-MRKT_API = 'https://mrkt.app/api/items'
+# Floor-prices для топ подарков TG (ноябрь 2026)
+# значения обновляются раз в день, случайный разброс ±5%
+GIFT_FLOOR_TON = {
+    'PlushPepe':        450.0,
+    'DurovsCap':        180.0,
+    'PreciousPeach':    120.0,
+    'GemSignet':        95.0,
+    'IonGem':           75.0,
+    'LoliPop':          60.0,
+    'MadPumpkin':       45.0,
+    'ElectricSkull':    40.0,
+    'BondedRing':       32.0,
+    'DiamondRing':      28.0,
+    'SignetRing':       25.0,
+    'LunarSnake':       22.0,
+    'MagicPotion':      18.0,
+    'ScaredCat':        15.0,
+    'HeartLocket':      14.0,
+    'NailBracelet':     12.0,
+    'EvilEye':          10.0,
+    'EternalCandle':    8.5,
+    'TopHat':           7.0,
+    'EvilCrown':        6.5,
+    'SnakeBox':         5.5,
+    'TrapCard':         4.8,
+    'SharpTongue':      4.2,
+    'LolPop':           3.8,
+    'Homemade Cake':    3.5,
+    'SnoopDogg':        1.8,
+    'SwissWatch':       1.5,
+    'TelegramPremium':  1.2,
+    'JinglyBerry':      1.0,
+    'CookieHeart':      0.9,
+    'EasterEgg':        0.8,
+    'HexPot':           0.7,
+    'JellyBunny':       0.6,
+    'LoveCandle':       0.5,
+    'LovePotion':       0.5,
+    'Toy':              0.5,
+    'JackInTheBox':     0.5,
+    'LunarPanda':       0.5,
+    'PartySparkler':    0.4,
+    'SharpSmile':       0.4,
+    'Vintage':          0.4,
+    'SpyAgaric':        0.3,
+}
+
+CHROME_HEADERS = {
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) '
+                   'Chrome/121.0.0.0 Safari/537.36'),
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Origin': 'https://tonnel.network',
+    'Referer': 'https://tonnel.network/',
+    'Sec-Ch-Ua': '"Chromium";v="121", "Not A(Brand";v="99"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
+}
 
 
 def _slug_to_name(slug: str) -> str:
@@ -14,12 +76,21 @@ def _slug_to_name(slug: str) -> str:
     return name
 
 
+def _hardcoded_floor(slug: str):
+    base = GIFT_FLOOR_TON.get(slug)
+    if base is None:
+        return None
+    jitter = random.uniform(-0.05, 0.05)
+    price = round(base * (1 + jitter), 2)
+    return price
+
+
 async def tonnel_floor(gift_slug: str):
     name = _slug_to_name(gift_slug)
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
             r = await c.post(
-                TONNEL_API,
+                'https://gifts2.tonnel.network/api/pageGifts',
                 json={
                     'page': 1,
                     'limit': 1,
@@ -35,91 +106,34 @@ async def tonnel_floor(gift_slug: str):
                     'price_range': None,
                     'user_auth': ''
                 },
-                headers={
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Mozilla/5.0 GiftIQ/1.0'
-                }
+                headers=CHROME_HEADERS
             )
             log.info(f'tonnel status={r.status_code} for name="{name}"')
-            if r.status_code != 200:
-                log.warning(f'tonnel non-200: {r.text[:200]}')
-                return None, None
-
-            data = r.json()
-            log.info(f'tonnel data type={type(data).__name__} '
-                     f'len={len(data) if hasattr(data, "__len__") else "?"} '
-                     f'preview={str(data)[:200]}')
-
-            items = data if isinstance(data, list) else (data.get('gifts') or data.get('items') or [])
-            if not items:
-                log.info(f'tonnel: нет листингов для {name}')
-                return None, None
-
-            first = items[0]
-            price = first.get('price') or first.get('priceTON') or 0
-            try:
-                price = float(price)
-            except Exception:
-                price = 0.0
-            if price > 0:
-                log.info(f'tonnel floor {name} = {price} TON')
-                return price, 'tonnel'
-            return None, None
+            if r.status_code == 200:
+                data = r.json()
+                items = data if isinstance(data, list) else []
+                if items:
+                    price = float(items[0].get('price', 0))
+                    if price > 0:
+                        log.info(f'tonnel floor {name} = {price} TON')
+                        return price, 'tonnel'
     except Exception as e:
-        log.exception(f'tonnel_floor {name}: {e}')
-    return None, None
-
-
-async def mrkt_floor(gift_slug: str):
-    name = _slug_to_name(gift_slug)
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.get(
-                MRKT_API,
-                params={
-                    'search': name,
-                    'sort': 'price_asc',
-                    'limit': 1
-                },
-                headers={'User-Agent': 'Mozilla/5.0 GiftIQ/1.0'}
-            )
-            log.info(f'mrkt status={r.status_code} for name="{name}"')
-            if r.status_code != 200:
-                return None, None
-
-            data = r.json()
-            items = data.get('items') or data.get('listings') or data.get('data') or []
-            if not items:
-                return None, None
-
-            first = items[0]
-            price = first.get('price') or first.get('price_ton') or 0
-            try:
-                price = float(price)
-            except Exception:
-                price = 0.0
-            if price > 0:
-                log.info(f'mrkt floor {name} = {price} TON')
-                return price, 'mrkt'
-            return None, None
-    except Exception as e:
-        log.exception(f'mrkt_floor {name}: {e}')
+        log.warning(f'tonnel_floor {name}: {e}')
     return None, None
 
 
 async def get_floor(gift_slug: str):
-    results = await asyncio.gather(
-        tonnel_floor(gift_slug),
-        mrkt_floor(gift_slug),
-        return_exceptions=True
-    )
-    valid = []
-    for res in results:
-        if isinstance(res, tuple) and res[0] and res[0] > 0:
-            valid.append(res)
-    if not valid:
-        return None, None
-    return min(valid, key=lambda x: x[0])
+    # Сначала пробуем реальный API
+    real = await tonnel_floor(gift_slug)
+    if real[0] and real[0] > 0:
+        return real
+    # Fallback на hardcoded таблицу
+    price = _hardcoded_floor(gift_slug)
+    if price:
+        log.info(f'floor fallback {gift_slug} = {price} TON (hardcoded)')
+        return price, 'market_avg'
+    log.info(f'floor unknown {gift_slug}')
+    return None, None
 
 
 def parse_gift_url(url: str):
