@@ -260,7 +260,7 @@ async def cmd_makeart(m: Message, command: CommandObject):
             'Пример: <code>/makeart neon diamond on dark background</code>'
         )
     credits = await storage.art_get(m.from_user.id)
-        if credits <= 0 and m.from_user.id != ADMIN_USER_ID:
+        if credits <= 0 and m.from_user.id !=ADMIN_USER_ID:
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=f'Купить за {ART_PRICE} звёзд', callback_data='art_buy')
         ]])
