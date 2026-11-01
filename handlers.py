@@ -1,5 +1,8 @@
 import time
 import re
+import base64
+
+import httpx
 
 from aiogram import Router, F
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
@@ -8,7 +11,7 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
 from aiogram.filters import Command, CommandObject
 
 from config import (ADMIN_USER_ID, TONNEL_REF, EPIC_GIFT_REF, XROCKET_REF,
-                    PREMIUM_PRICE, RUB_PER_TON)
+                    GEMINI_API_KEY, PREMIUM_PRICE, ART_PRICE, RUB_PER_TON)
 import storage
 import markets
 import render
@@ -36,6 +39,33 @@ def xrocket_link():
     return 'https://t.me/xrocket'
 
 
+async def gemini_generate_image(prompt: str):
+    if not GEMINI_API_KEY:
+        return None
+    url = (
+        'https://generativelanguage.googleapis.com/v1beta/models/'
+        'gemini-2.5-flash-image-preview:generateContent'
+        f'?key={GEMINI_API_KEY}'
+    )
+    try:
+        async with httpx.AsyncClient(timeout=90) as c:
+            r = await c.post(url, json={
+                'contents': [{'parts': [{'text': prompt}]}],
+                'generationConfig': {'responseModalities': ['TEXT', 'IMAGE']}
+            })
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            for cand in data.get('candidates', []):
+                for part in cand.get('content', {}).get('parts', []):
+                    inline = part.get('inlineData') or part.get('inline_data')
+                    if inline and inline.get('data'):
+                        return base64.b64decode(inline['data'])
+    except Exception:
+        return None
+    return None
+
+
 @router.message(Command('start'))
 async def cmd_start(m: Message, command: CommandObject):
     ref = None
@@ -55,6 +85,7 @@ async def cmd_start(m: Message, command: CommandObject):
         [InlineKeyboardButton(text='Моё портфолио', callback_data='portfolio')],
         [InlineKeyboardButton(text='Бесплатный кейс Epic Gift', url=epic_gift_link())],
         [InlineKeyboardButton(text='xRocket P2P (продать подарки)', url=xrocket_link())],
+        [InlineKeyboardButton(text='AI-арт (генерация картинок)', callback_data='art_info')],
         [InlineKeyboardButton(text='Премиум', callback_data='premium_info')],
         [InlineKeyboardButton(text='Пригласить друга', callback_data='ref_show')],
     ])
@@ -64,10 +95,11 @@ async def cmd_start(m: Message, command: CommandObject):
         '• Показать стоимость всей коллекции\n'
         '• Отслеживать цены на tonnel и mrkt\n'
         '• Генерировать карточку и анимацию для сторис\n'
+        '• <b>AI-арт</b> — создавать уникальные картинки по описанию\n'
         '• Присылать уведомления о колебаниях (премиум)\n\n'
         'Бонус дня: открой БЕСПЛАТНЫЙ кейс в Epic Gift. '
-        'Реальные NFT подарки TON сразу на твой кошелёк.\n\n'
-        'Кейс обновляется каждые 24 часа. Приходи каждый день.\n\n'
+        'Реальные NFT подарки TON сразу на твой кошелёк. '
+        'Кейс обновляется каждые 24 часа.\n\n'
         'Начни с «Добавить подарок»',
         reply_markup=kb
     )
@@ -142,6 +174,7 @@ async def show_portfolio(m, user_id):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='Карточка (фото)', callback_data='share_card'),
          InlineKeyboardButton(text='Анимация', callback_data='share_gif')],
+        [InlineKeyboardButton(text='AI-арт', callback_data='art_info')],
         [InlineKeyboardButton(text='БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
         [InlineKeyboardButton(text='Продать на xRocket (P2P)', url=xrocket_link())],
         [InlineKeyboardButton(text='Продать на MRKT', url='https://t.me/mrkt')],
@@ -180,6 +213,77 @@ async def cb_share_gif(c: CallbackQuery):
     await c.message.answer_animation(
         BufferedInputFile(buf.getvalue(), filename='collection.gif'),
         caption=f'моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
+    )
+
+
+@router.callback_query(F.data == 'art_info')
+async def cb_art_info(c: CallbackQuery):
+    credits = await storage.art_get(c.from_user.id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f'Купить за {ART_PRICE} звёзд', callback_data='art_buy')
+    ]])
+    await c.message.answer(
+        '<b>AI-арт</b> — уникальная картинка по твоему описанию.\n\n'
+        'Создана через Google Gemini, HD качество, под твой запрос. '
+        'Идеально для сторис, аватарок, подарков друзьям.\n\n'
+        f'Стоимость: <b>{ART_PRICE} звёзд</b> за одну генерацию\n'
+        f'У тебя сейчас: <b>{credits}</b> генераций\n\n'
+        'После покупки — пиши:\n'
+        '<code>/makeart описание картинки</code>\n\n'
+        'Примеры промптов:\n'
+        '• /makeart neon diamond on dark background\n'
+        '• /makeart открытка с драконом в стиле anime\n'
+        '• /makeart абстрактный космос фиолетово-синий',
+        reply_markup=kb
+    )
+    await c.answer()
+
+
+@router.callback_query(F.data == 'art_buy')
+async def cb_art_buy(c: CallbackQuery):
+    await c.message.answer_invoice(
+        title='AI-арт генерация',
+        description='Создай уникальную картинку через AI',
+        payload='art_credit',
+        currency='XTR',
+        prices=[LabeledPrice(label='AI Art', amount=ART_PRICE)]
+    )
+    await c.answer()
+
+
+@router.message(Command('makeart'))
+async def cmd_makeart(m: Message, command: CommandObject):
+    prompt = (command.args or '').strip()
+    if not prompt:
+        return await m.answer(
+            'Напиши описание после команды.\n'
+            'Пример: <code>/makeart neon diamond on dark background</code>'
+        )
+    credits = await storage.art_get(m.from_user.id)
+    if credits <= 0:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f'Купить за {ART_PRICE} звёзд', callback_data='art_buy')
+        ]])
+        return await m.answer(
+            'У тебя 0 генераций. Купи одну за звёзды.',
+            reply_markup=kb
+        )
+    msg = await m.answer('Генерирую картинку... (10-30 сек)')
+    img = await gemini_generate_image(prompt)
+    if not img:
+        return await msg.edit_text(
+            'Не удалось сгенерировать. Попробуй другое описание.\n'
+            'Генерации не списались.'
+        )
+    await storage.art_use(m.from_user.id)
+    left = await storage.art_get(m.from_user.id)
+    await m.answer_photo(
+        BufferedInputFile(img, filename='art.png'),
+        caption=(
+            f'<b>AI-арт по запросу:</b>\n<i>{prompt[:200]}</i>\n\n'
+            f'Осталось генераций: {left}\n'
+            f'Создано в @giftiq_tg_bot'
+        )
     )
 
 
@@ -224,6 +328,13 @@ async def paid(m: Message):
     if sp.invoice_payload == 'premium_month':
         until = await storage.premium_grant(m.from_user.id, 30)
         await m.answer(f'Премиум активен до {time.strftime("%d.%m.%Y", time.localtime(until))}')
+    elif sp.invoice_payload == 'art_credit':
+        await storage.art_grant(m.from_user.id, 1)
+        credits = await storage.art_get(m.from_user.id)
+        await m.answer(
+            f'Генерация добавлена. У тебя {credits} AI-арт генераций.\n\n'
+            'Используй: <code>/makeart описание</code>'
+        )
 
 
 @router.callback_query(F.data == 'ref_show')
