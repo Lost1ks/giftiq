@@ -5,7 +5,7 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
                            BufferedInputFile)
 from aiogram.filters import Command, CommandObject
 
-from config import BOT_TOKEN, ADMIN_USER_ID, TONNEL_REF, PREMIUM_PRICE, RUB_PER_TON
+from config import BOT_TOKEN, ADMIN_USER_ID, TONNEL_REF, EPIC_GIFT_REF, PREMIUM_PRICE, RUB_PER_TON
 import storage
 import markets
 import render
@@ -16,6 +16,13 @@ def tonnel_link(slug=None):
     base = 'https://t.me/tonnel_network_bot'
     if TONNEL_REF:
         return f'{base}?start=ref_{TONNEL_REF}'
+    return base
+
+def epic_gift_link():
+    base = 'https://t.me/epic_gift_bot/app'
+    if EPIC_GIFT_REF:
+        return f'{base}?
+  startapp=ref_{EPIC_GIFT_REF}'
     return base
 
 @router.message(Command('start'))
@@ -29,21 +36,24 @@ async def cmd_start(m: Message, command: CommandObject):
         m.from_user.full_name, ref
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='➕ Добавить подарок', callback_data='add_gift')],
-        [InlineKeyboardButton(text='📊 Моё портфолио', callback_data='portfolio')],
-        [InlineKeyboardButton(text='💎 Премиум', callback_data='premium_info')],
-        [InlineKeyboardButton(text='👥 Пригласить друга', callback_data='ref_show')],
-    ])
+    [InlineKeyboardButton(text='➕ Добавить подарок', callback_data='add_gift')],
+    [InlineKeyboardButton(text='📊 Моё портфолио', callback_data='portfolio')],
+    [InlineKeyboardButton(text='🎁 Бесплатный кейс Epic Gift', url=epic_gift_link())],
+    [InlineKeyboardButton(text='💎 Премиум', callback_data='premium_info')],
+    [InlineKeyboardButton(text='👥 Пригласить друга', callback_data='ref_show')],
+])
     await m.answer(
-        '💎 <b>GiftIQ</b> — твой портфолио-трекер TG подарков\n\n'
-        '🎯 Что умею:\n'
-        '• Показать стоимость всей коллекции\n'
-        '• Отслеживать цены на tonnel / mrkt\n'
-        '• Генерировать красивую карточку для сторис\n'
-        '• Присылать уведомления о колебаниях (премиум)\n\n'
-        '👉 Начни с кнопки <b>«Добавить подарок»</b>',
-        reply_markup=kb, parse_mode='HTML'
-    )
+    '<b>💎 GiftIQ</b> — портфолио-трекер TG подарков\n\n'
+    'Что умею:\n'
+    '• Показать стоимость всей коллекции\n'
+    '• Отслеживать цены на tonnel / mrkt\n'
+    '• Генерировать карточку для сторис\n'
+    '• Присылать уведомления о колебаниях (премиум)\n\n'
+    '🔥 <b>Бонус:</b> открой <b>БЕСПЛАТНЫЙ кейс</b> с реальными NFT подарками TON\n'
+    '— они сразу выводятся на твой кошелёк. Жми кнопку ниже.\n\n'
+    'Начни с <b>«Добавить подарок»</b>',
+    reply_markup=kb
+)
 
 @router.callback_query(F.data == 'add_gift')
 async def cb_add(c: CallbackQuery):
@@ -109,9 +119,10 @@ async def show_portfolio(m: Message, user_id: int):
         lines.append(f'... и ещё {len(gifts) - 20}')
     lines.append(f'\n📊 всего: <b>{total_ton:.2f} TON</b> (~{total_rub:,.0f} ₽)')
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='📸 Карточка для сторис', callback_data='share_card')],
-        [InlineKeyboardButton(text='🛒 Продать на tonnel', url=tonnel_link())],
-    ])
+    [InlineKeyboardButton(text='📸 Карточка для сторис', callback_data='share_card')],
+    [InlineKeyboardButton(text='🎁 БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
+    [InlineKeyboardButton(text='💰 Продать на MRKT', url='https://t.me/mrkt')],
+])
     await m.answer('\n'.join(lines).replace(',', ' '),
                    parse_mode='HTML', reply_markup=kb)
 
