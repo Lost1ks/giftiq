@@ -130,11 +130,12 @@ async def show_portfolio(m, user_id):
         lines.append(f'... и ещё {len(gifts) - 20}')
     rub_s = f'{int(total_rub):,}'.replace(',', ' ')
     lines.append(f'\nВсего: <b>{total_ton:.2f} TON</b> (~{rub_s} rub)')
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='📸 Карточка для сторис', callback_data='share_card')],
-        [InlineKeyboardButton(text='🎁 БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
-        [InlineKeyboardButton(text='💰 Продать на MRKT', url='https://t.me/mrkt')],
-    ])
+   kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text='📸 Карточка (фото)', callback_data='share_card'),
+     InlineKeyboardButton(text='🎬 Анимация', callback_data='share_gif')],
+    [InlineKeyboardButton(text='🎁 БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
+    [InlineKeyboardButton(text='💰 Продать на MRKT', url='https://t.me/mrkt')],
+])
     await m.answer('\n'.join(lines), reply_markup=kb)
 
 
@@ -154,6 +155,21 @@ async def cb_share(c: CallbackQuery):
     )
     await c.answer()
 
+@router.callback_query(F.data == 'share_gif')
+async def cb_share_gif(c: CallbackQuery):
+    gifts = await storage.gifts_list(c.from_user.id)
+    if not gifts:
+        return await c.answer('Коллекция пуста', show_alert=True)
+    total_ton = sum(g['last_price_ton'] or 0 for g in gifts)
+    total_rub = total_ton * RUB_PER_TON
+    await c.answer('Генерирую анимацию...')
+    buf = render.collection_gif(
+        c.from_user.username or 'anon', gifts, total_ton, total_rub
+    )
+    await c.message.answer_animation(
+        BufferedInputFile(buf.getvalue(), filename='collection.gif'),
+        caption=f'🎬 моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
+    )
 
 @router.callback_query(F.data == 'premium_info')
 async def cb_premium_info(c: CallbackQuery):
