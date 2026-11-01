@@ -7,7 +7,8 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
                            BufferedInputFile)
 from aiogram.filters import Command, CommandObject
 
-from config import ADMIN_USER_ID, TONNEL_REF, EPIC_GIFT_REF, PREMIUM_PRICE, RUB_PER_TON
+from config import (ADMIN_USER_ID, TONNEL_REF, EPIC_GIFT_REF, XROCKET_REF,
+                    PREMIUM_PRICE, RUB_PER_TON)
 import storage
 import markets
 import render
@@ -29,6 +30,12 @@ def epic_gift_link():
     return base
 
 
+def xrocket_link():
+    if XROCKET_REF:
+        return f'https://t.me/xrocket?start=p2p_{XROCKET_REF}'
+    return 'https://t.me/xrocket'
+
+
 @router.message(Command('start'))
 async def cmd_start(m: Message, command: CommandObject):
     ref = None
@@ -47,6 +54,7 @@ async def cmd_start(m: Message, command: CommandObject):
         [InlineKeyboardButton(text='➕ Добавить подарок', callback_data='add_gift')],
         [InlineKeyboardButton(text='📊 Моё портфолио', callback_data='portfolio')],
         [InlineKeyboardButton(text='🎁 Бесплатный кейс Epic Gift', url=epic_gift_link())],
+        [InlineKeyboardButton(text='💱 xRocket P2P (продать подарки)', url=xrocket_link())],
         [InlineKeyboardButton(text='💎 Премиум', callback_data='premium_info')],
         [InlineKeyboardButton(text='👥 Пригласить друга', callback_data='ref_show')],
     ])
@@ -134,6 +142,7 @@ async def show_portfolio(m, user_id):
         [InlineKeyboardButton(text='📸 Карточка (фото)', callback_data='share_card'),
          InlineKeyboardButton(text='🎬 Анимация', callback_data='share_gif')],
         [InlineKeyboardButton(text='🎁 БЕСПЛАТНЫЙ кейс Epic Gift', url=epic_gift_link())],
+        [InlineKeyboardButton(text='💱 Продать на xRocket (P2P)', url=xrocket_link())],
         [InlineKeyboardButton(text='💰 Продать на MRKT', url='https://t.me/mrkt')],
     ])
     await m.answer('\n'.join(lines), reply_markup=kb)
