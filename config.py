@@ -17,7 +17,7 @@ TONNEL_REF = os.environ.get('TONNEL_REF', '')
 EPIC_GIFT_REF = os.environ.get('EPIC_GIFT_REF', '')
 XROCKET_REF = os.environ.get('XROCKET_REF', '')
 CHANNEL_URL = os.environ.get('CHANNEL_URL', 'https://t.me/giftIQ_news')
-WEBAPP_URL = os.environ.get('WEBAPP_URL', 'https://lost1ks.github.io/giftiq-landing/app/?v=3')  # ?v= сбрасывает кэш Telegram после правок приложения
+WEBAPP_URL = os.environ.get('WEBAPP_URL', 'https://lost1ks.github.io/giftiq-landing/app/?v=4')  # ?v= сбрасывает кэш Telegram после правок приложения
 REVEAL_PRICE = int(os.environ.get('REVEAL_PRICE', '500'))
 PREMIUM_PRICE = int(os.environ.get('PREMIUM_PRICE', '500'))
 ART_PRICE = int(os.environ.get('ART_PRICE', '100'))

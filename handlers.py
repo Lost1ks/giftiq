@@ -162,6 +162,8 @@ WELCOME = (
 
 @router.message(Command('start'))
 async def cmd_start(m: Message, command: CommandObject):
+    if command.args and command.args.startswith('add_'):   # добавление из Mini App: /start add_SnoopDogg-471247
+        return await add_gift(m, 't.me/nft/' + command.args[4:])
     ref = None
     if command.args and command.args.startswith('ref'):
         try:
@@ -213,7 +215,11 @@ async def cb_add(c: CallbackQuery):
 
 @router.message(F.text.regexp(GIFT_LINK_RE, mode='search'))
 async def handle_gift_link(m: Message):
-    url = re.search(GIFT_LINK_RE, m.text).group(0)
+    await add_gift(m, re.search(GIFT_LINK_RE, m.text).group(0))
+
+
+async def add_gift(m: Message, url: str):
+    """Добавляет подарок по ссылке t.me/nft/... (из сообщения или из Mini App через /start add_...)."""
     parsed = markets.parse_gift_url(url)
     if not parsed:
         return await m.answer('Не удалось распознать ссылку')
@@ -229,8 +235,9 @@ async def handle_gift_link(m: Message):
         m.from_user.id, parsed['slug'], q['name'],
         parsed['number'], price, market
     )
+    app_kb = InlineKeyboardMarkup(inline_keyboard=[[await webapp_button(m.from_user.id, m.from_user.username)]])
     if not added:
-        return await wait.edit_text('Этот подарок уже в твоей коллекции. /portfolio')
+        return await wait.edit_text('Этот подарок уже в твоей коллекции. /portfolio', reply_markup=app_kb)
     rate = await markets.ton_rub()
     if price:
         per_market = '\n'.join(
@@ -244,7 +251,8 @@ async def handle_gift_link(m: Message):
     await wait.edit_text(
         f'Добавил: <b>{html.escape(q["name"])} #{parsed["number"]}</b>\n'
         f'{price_text}\n\n'
-        '/portfolio — моя коллекция'
+        '/portfolio — моя коллекция',
+        reply_markup=app_kb
     )
 
 
