@@ -440,8 +440,9 @@ async def cmd_makeart(m: Message, command: CommandObject):
             'Напиши описание после команды.\n'
             'Пример: <code>/makeart neon diamond on dark background</code>'
         )
+    is_admin = ADMIN_USER_ID and m.from_user.id == ADMIN_USER_ID   # админу генерации бесплатно (тест, картинки для канала)
     credits = await storage.art_get(m.from_user.id)
-    if credits <= 0:
+    if credits <= 0 and not is_admin:
         if not art_available():
             return await m.answer('AI-арт временно недоступен.')
         kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -455,7 +456,7 @@ async def cmd_makeart(m: Message, command: CommandObject):
             'Не удалось сгенерировать. Попробуй другое описание чуть позже.\n'
             'Генерация не списалась.'
         )
-    if not await storage.art_use(m.from_user.id):
+    if not is_admin and not await storage.art_use(m.from_user.id):
         return await msg.edit_text('Генерации закончились. Купи ещё через /start → AI-арт')
     left = await storage.art_get(m.from_user.id)
     await msg.delete()
