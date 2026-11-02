@@ -340,9 +340,9 @@ async def cb_share_gif(c: CallbackQuery):
         return
     name, gifts, total_ton, total_rub, rate = data
     await c.answer('Генерирую анимацию...')
-    buf = await asyncio.to_thread(render.collection_gif, name, gifts, total_ton, total_rub, rate)
+    buf, filename = await asyncio.to_thread(render.collection_gif, name, gifts, total_ton, total_rub, rate)
     await c.message.answer_animation(
-        BufferedInputFile(buf.getvalue(), filename='collection.gif'),
+        BufferedInputFile(buf.getvalue(), filename=filename),
         caption=f'моя коллекция TG Gifts: <b>{total_ton:.2f} TON</b>\n@giftiq_tg_bot'
     )
 
