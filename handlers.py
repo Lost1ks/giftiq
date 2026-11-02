@@ -94,13 +94,33 @@ async def gemini_generate_image(prompt: str):
     return None
 
 
+CF_AI = 'https://api.cloudflare.com/client/v4/accounts/{}/ai/run/'
+
+
+async def cloudflare_translate(c, text: str) -> str:
+    """FLUX лучше понимает английский: русское описание переводим (m2m100), при сбое — оставляем как есть."""
+    if not re.search('[а-яА-ЯёЁ]', text):
+        return text
+    try:
+        r = await c.post(CF_AI.format(CF_ACCOUNT_ID) + '@cf/meta/m2m100-1.2b',
+                         headers={'Authorization': f'Bearer {CF_API_TOKEN}'},
+                         json={'text': text, 'source_lang': 'russian', 'target_lang': 'english'})
+        out = (r.json().get('result') or {}).get('translated_text', '').strip()
+        if len(re.findall('[A-Za-z]', out)) >= 3:
+            log.info(f'перевод для FLUX: {text[:60]!r} -> {out[:60]!r}')
+            return out
+    except Exception as e:
+        log.warning(f'cloudflare translate: {e}')
+    return text
+
+
 async def cloudflare_generate_image(prompt: str):
     if not (CF_ACCOUNT_ID and CF_API_TOKEN):
         return None
-    url = (f'https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}'
-           '/ai/run/@cf/black-forest-labs/flux-1-schnell')
+    url = CF_AI.format(CF_ACCOUNT_ID) + '@cf/black-forest-labs/flux-1-schnell'
     try:
         async with httpx.AsyncClient(timeout=90) as c:
+            prompt = await cloudflare_translate(c, prompt)
             r = await c.post(url, headers={'Authorization': f'Bearer {CF_API_TOKEN}'},
                              json={'prompt': prompt, 'steps': 8})
         if r.status_code != 200:
