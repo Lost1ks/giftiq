@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import random
+import re
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -17,7 +18,15 @@ import storage
 
 log = logging.getLogger('jobs')
 
-CHANNEL = os.environ.get('CHANNEL_USERNAME', '@giftIQ_news')
+def normalize_channel(value: str) -> str:
+    """giftIQ_news / t.me/giftIQ_news / @giftIQ_news -> @giftIQ_news; числовой id оставляем как есть."""
+    v = re.sub(r'^(https?://)?t\.me/', '', (value or '').strip()).strip('/')
+    if v and not v.startswith('@') and not v.lstrip('-').isdigit():
+        v = '@' + v
+    return v
+
+
+CHANNEL = normalize_channel(os.environ.get('CHANNEL_USERNAME') or '@giftIQ_news')
 # автопосты 3 раза в день (топ, хиты продаж, подарок дня...). AUTO_POSTS=0 — выключить
 AUTO_POSTS = os.environ.get('AUTO_POSTS', '1') != '0'
 BOT_LINK = 'https://t.me/giftiq_tg_bot'
