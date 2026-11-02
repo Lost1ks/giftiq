@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import html
+import json
 import logging
 import re
 import time
@@ -10,11 +11,11 @@ import httpx
 from aiogram import Router, F
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
                            InlineKeyboardButton, LabeledPrice, PreCheckoutQuery,
-                           BufferedInputFile, ErrorEvent)
+                           BufferedInputFile, ErrorEvent, WebAppInfo)
 from aiogram.filters import Command, CommandObject
 
 from config import (ADMIN_USER_ID, TONNEL_REF, EPIC_GIFT_REF, XROCKET_REF, CHANNEL_URL,
-                    GEMINI_API_KEY, GEMINI_IMAGE_MODEL, CF_ACCOUNT_ID, CF_API_TOKEN,
+                    GEMINI_API_KEY, GEMINI_IMAGE_MODEL, CF_ACCOUNT_ID, CF_API_TOKEN, WEBAPP_URL,
                     PREMIUM_PRICE, ART_PRICE, REF_BONUS_DAYS)
 import storage
 import markets
@@ -27,6 +28,7 @@ router = Router()
 GIFT_LINK_RE = r't\.me/nft/[A-Za-z0-9]+-\d+'
 MARKET_NAMES = {'portals': 'Portals', 'tonnel': 'Tonnel'}
 REFRESH_COOLDOWN = 60
+WEBAPP_MAX_GIFTS = 40
 _last_refresh = {}
 
 
@@ -117,8 +119,22 @@ async def generate_image(prompt: str):
     return img
 
 
-def main_kb():
+async def webapp_button(user_id, username=''):
+    """Кнопка Mini App: коллекция пользователя упакована в ссылку (#d=base64url JSON)."""
+    gifts = await storage.gifts_list(user_id)
+    data = {
+        'u': username or '',
+        'r': round(await markets.ton_rub(), 2),
+        'e': epic_gift_link(),
+        'g': [[g['slug'], g['name'], g['number'], round(g['last_price_ton'] or 0, 2)] for g in gifts[:WEBAPP_MAX_GIFTS]],
+    }
+    packed = base64.urlsafe_b64encode(json.dumps(data, separators=(',', ':')).encode()).decode().rstrip('=')
+    return InlineKeyboardButton(text='📱 Открыть приложение', web_app=WebAppInfo(url=f'{WEBAPP_URL}#d={packed}'))
+
+
+async def main_kb(user):
     return InlineKeyboardMarkup(inline_keyboard=[
+        [await webapp_button(user.id, user.username)],
         [InlineKeyboardButton(text='Добавить подарок', callback_data='add_gift')],
         [InlineKeyboardButton(text='Моё портфолио', callback_data='portfolio')],
         [InlineKeyboardButton(text='Бесплатный кейс Epic Gift', url=epic_gift_link())],
@@ -170,7 +186,7 @@ async def cmd_start(m: Message, command: CommandObject):
             )
         except Exception as e:
             log.info(f'ref notify {ref}: {e}')
-    await m.answer(WELCOME, reply_markup=main_kb())
+    await m.answer(WELCOME, reply_markup=await main_kb(m.from_user))
 
 
 @router.message(Command('help'))
@@ -180,7 +196,7 @@ async def cmd_help(m: Message):
         '/portfolio — моя коллекция\n'
         '/makeart описание — AI-арт\n'
         '/premium — премиум',
-        reply_markup=main_kb()
+        reply_markup=await main_kb(m.from_user)
     )
 
 
@@ -259,6 +275,7 @@ async def show_portfolio(m, user_id):
     lines.append(f'\nВсего: <b>{total_ton:.2f} TON</b> (~{rub_fmt(total_ton, rate)} ₽)')
     lines.append(f'<i>Floor-цены Portals/Tonnel, курс 1 TON ≈ {rate:.0f} ₽</i>')
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [await webapp_button(user_id)],
         [InlineKeyboardButton(text='Карточка (фото)', callback_data='share_card'),
          InlineKeyboardButton(text='Анимация', callback_data='share_gif')],
         [InlineKeyboardButton(text='Обновить цены', callback_data='refresh'),
