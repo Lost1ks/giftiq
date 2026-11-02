@@ -352,6 +352,36 @@ def collection_gif(user_name: str, gifts: list, total_ton: float, total_rub: flo
     return buf, 'giftiq.gif'
 
 
+# ---------- картинка для поста в канал ----------
+
+def top_card(title: str, subtitle: str, rows: list):
+    """Квадратная картинка 1080×1080: заголовок и до 5 строк (название, значение). -> PNG bytes"""
+    W = H = 1080
+    s = W / BASE_W
+    pal = 0
+    acc = PALETTES[pal][2]
+    img = _background(W, H, pal).copy()
+    _moving_glows(img, pal, 0.4, s)
+    _sparkles_layer(img, pal, 0.4, s)
+    _place_crystal(img, W - 120 * s, 95 * s, int(190 * s), 0.0, pal)
+    L = _Layer(W, H)
+    L.text(50, 45, title, 58, anchor='lt', max_w=470)
+    L.text(52, 125, subtitle, 26, SOFT, bold=False, anchor='lt', max_w=470)
+    L.panel(40, 200, 680, 200 + len(rows) * 88 + 30)
+    d = ImageDraw.Draw(L.img)
+    for i, (name, value) in enumerate(rows):
+        y = 232 + i * 88
+        d.ellipse([L.p(66), L.p(y - 4), L.p(118), L.p(y + 48)], fill=acc + (255,))
+        L.text(92, y + 6, str(i + 1), 30, (20, 10, 40))
+        L.text(140, y + 6, name, 32, anchor='lt', max_w=330)
+        L.text(655, y + 6, value, 32, acc, anchor='rt', max_w=190)
+    L.text(360, 680, 't.me/giftiq_tg_bot', 30, (200, 205, 235))
+    img.alpha_composite(L.done().img)
+    buf = io.BytesIO()
+    img.convert('RGB').save(buf, 'PNG', optimize=True)
+    return buf.getvalue()
+
+
 # ---------- карточка (PNG) ----------
 
 def collection_card(user_name: str, gifts: list, total_ton: float, total_rub: float):

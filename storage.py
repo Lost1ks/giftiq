@@ -45,6 +45,14 @@ async def init_db():
             payload TEXT,
             paid_at INTEGER
         );
+        CREATE TABLE IF NOT EXISTS scheduled_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_chat INTEGER,
+            message_id INTEGER,
+            post_at INTEGER,
+            status TEXT DEFAULT 'queued',
+            created_at INTEGER
+        );
         """)
         for ddl in ("ALTER TABLE users ADD COLUMN art_credits INTEGER DEFAULT 0",
                     "ALTER TABLE payments ADD COLUMN charge_id TEXT"):
@@ -212,6 +220,42 @@ async def art_use(user_id):
             "UPDATE users SET art_credits = art_credits - 1 "
             "WHERE user_id=? AND COALESCE(art_credits,0) > 0", (user_id,)
         )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def sched_add(from_chat, message_id, post_at):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO scheduled_posts (from_chat, message_id, post_at, created_at) VALUES (?, ?, ?, ?)",
+            (from_chat, message_id, int(post_at), int(time.time()))
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def sched_due():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id, from_chat, message_id FROM scheduled_posts "
+            "WHERE status='queued' AND post_at <= ? ORDER BY post_at", (int(time.time()),)
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def sched_list():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id, from_chat, message_id, post_at FROM scheduled_posts "
+            "WHERE status='queued' ORDER BY post_at"
+        ) as cur:
+            return await cur.fetchall()
+
+
+async def sched_set_status(post_id, status):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE scheduled_posts SET status=? WHERE id=? AND status='queued'", (status, post_id))
         await db.commit()
         return cur.rowcount > 0
 

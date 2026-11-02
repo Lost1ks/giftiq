@@ -6,6 +6,7 @@ from aiogram.types import BotCommand
 
 from config import BOT_TOKEN
 import storage
+import admin
 import handlers
 import jobs
 
@@ -27,6 +28,7 @@ async def main():
     await storage.init_db()
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    dp.include_router(admin.router)   # раньше handlers: шаги /newpost не должны попадать в общие обработчики
     dp.include_router(handlers.router)
     try:
         await bot.set_my_commands(COMMANDS)

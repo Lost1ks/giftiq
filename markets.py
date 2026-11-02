@@ -62,7 +62,8 @@ async def portals_collections():
                             floor = float(col.get('floor_price') or 0)
                         except ValueError:
                             floor = 0.0
-                        data[key] = {'name': col.get('name') or key, 'floor': floor}
+                        data[key] = {'name': col.get('name') or key, 'floor': floor,
+                                     'sales_24h': int(col.get('sales_24h_count') or 0)}
                     if len(cols) < 100:
                         break
                     offset += 100
@@ -149,6 +150,13 @@ async def top_collections(n=5):
     cols = await portals_collections()
     return sorted(((c['name'], c['floor']) for c in cols.values() if c['floor'] > 0),
                   key=lambda x: -x[1])[:n]
+
+
+async def top_sales(n=5):
+    """[(name, продаж за 24ч, floor)] — самые продаваемые коллекции Portals."""
+    cols = await portals_collections()
+    return sorted(((c['name'], c.get('sales_24h', 0), c['floor']) for c in cols.values()
+                   if c.get('sales_24h', 0) > 0), key=lambda x: -x[1])[:n]
 
 
 def parse_gift_url(url: str):

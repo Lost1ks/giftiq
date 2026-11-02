@@ -8,13 +8,18 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 
-from config import EPIC_GIFT_REF
+from aiogram.types import BufferedInputFile
+
+from config import EPIC_GIFT_REF, ADMIN_USER_ID
 import markets
+import render
 import storage
 
 log = logging.getLogger('jobs')
 
-CHANNEL = os.environ.get('CHANNEL_USERNAME', '')
+CHANNEL = os.environ.get('CHANNEL_USERNAME', '@giftIQ_news')
+# автопосты 3 раза в день (топ, хиты продаж, подарок дня...). AUTO_POSTS=0 — выключить
+AUTO_POSTS = os.environ.get('AUTO_POSTS', '1') != '0'
 BOT_LINK = 'https://t.me/giftiq_tg_bot'
 MARKET_NAMES = {'portals': 'Portals', 'tonnel': 'Tonnel'}
 # старые цены с этими метками были выдуманы (таблица + случайный разброс) — по ним не алертим
@@ -40,8 +45,23 @@ async def _post_top(bot):
     lines = ['<b>💎 ТОП-5 дорогих подарков TG сегодня (floor):</b>\n']
     for i, (name, price) in enumerate(top, 1):
         lines.append(f'<b>{i}. {name}</b> — {price:.1f} TON (~{rub_str(price, rate)} ₽)')
-    lines.append(f'\n📊 Твой трекер: {BOT_LINK}')
-    return '\n'.join(lines)
+    lines.append(f'\n📊 Оцени свою коллекцию: {BOT_LINK}')
+    photo = await asyncio.to_thread(render.top_card, 'ТОП-5 подарков', 'самые дорогие по floor-цене',
+                                    [(n, f'{p:.0f} TON') for n, p in top])
+    return '\n'.join(lines), photo
+
+
+async def _post_hot_sales(bot):
+    hot = await markets.top_sales(5)
+    if not hot:
+        return None
+    lines = ['<b>🔥 Хиты продаж за 24 часа</b> (Portals)\n']
+    for i, (name, sales, floor) in enumerate(hot, 1):
+        lines.append(f'<b>{i}. {name}</b> — {sales:,} продаж, floor {floor:.1f} TON'.replace(',', ' '))
+    lines.append(f'\nСледи за ценами своих подарков: {BOT_LINK}')
+    photo = await asyncio.to_thread(render.top_card, 'Хиты продаж', 'больше всего сделок за 24 часа',
+                                    [(n, f'{s:,} шт'.replace(',', ' ')) for n, s, _ in hot])
+    return '\n'.join(lines), photo
 
 
 async def _post_gift_of_day(bot):
@@ -93,26 +113,87 @@ async def _post_cta(bot):
 POST_GENERATORS = [
     _post_top,
     _post_gift_of_day,
+    _post_hot_sales,
     _post_epic_case,
     _post_rarity,
     _post_cta,
 ]
+_post_state = {'next': random.randrange(len(POST_GENERATORS)), 'admin_warned': False}
 
 
-async def post_to_channel(bot):
-    if not CHANNEL:
-        log.warning('CHANNEL_USERNAME не задан, пропускаю пост')
-        return
-    gen = random.choice(POST_GENERATORS)
+async def _safe(gen, bot):
     try:
-        text = await gen(bot)
-        if not text:
-            log.info(f'{gen.__name__}: пустой текст, пропускаю')
-            return
-        await bot.send_message(CHANNEL, text, parse_mode='HTML', disable_web_page_preview=True)
+        return await gen(bot)
+    except Exception as e:
+        log.exception(f'{gen.__name__}: {e}')
+        return None
+
+
+async def _notify_admin(bot, text):
+    if ADMIN_USER_ID:
+        try:
+            await bot.send_message(ADMIN_USER_ID, text)
+        except Exception:
+            pass
+
+
+async def publish_scheduled(bot):
+    """Публикует посты из /newpost, у которых подошло время (копия сообщения админа в канал)."""
+    for post_id, from_chat, msg_id in await storage.sched_due():
+        try:
+            await bot.copy_message(CHANNEL, from_chat, msg_id)
+            await storage.sched_set_status(post_id, 'sent')
+            log.info(f'запланированный пост #{post_id} опубликован')
+            await _notify_admin(bot, f'Пост #{post_id} опубликован в {CHANNEL}')
+        except Exception as e:
+            log.exception(f'пост #{post_id}: {e}')
+            await storage.sched_set_status(post_id, 'error')
+            await _notify_admin(bot, f'Пост #{post_id} не опубликован: {e}\n\n'
+                                     'Проверь, что бот — админ канала, и что ты не удалил сообщение с постом.')
+
+
+async def post_to_channel(bot, gen=None):
+    """Публикует следующий пост по кругу. -> (ok, описание)"""
+    if not CHANNEL:
+        log.warning('CHANNEL_USERNAME пустой, пропускаю пост')
+        return False, 'канал не задан'
+    if gen is None:
+        # темы идут по кругу; если пост не собрался (нет данных) — берём следующий
+        for _ in range(len(POST_GENERATORS)):
+            gen = POST_GENERATORS[_post_state['next']]
+            _post_state['next'] = (_post_state['next'] + 1) % len(POST_GENERATORS)
+            post = await _safe(gen, bot)
+            if post:
+                break
+        else:
+            return False, 'нет данных ни для одного поста'
+    else:
+        post = await _safe(gen, bot)
+        if not post:
+            return False, f'{gen.__name__}: нет данных'
+    text, photo = post if isinstance(post, tuple) else (post, None)
+    try:
+        if photo:
+            await bot.send_photo(CHANNEL, BufferedInputFile(photo, filename='giftiq.png'),
+                                 caption=text, parse_mode='HTML')
+        else:
+            await bot.send_message(CHANNEL, text, parse_mode='HTML', disable_web_page_preview=True)
         log.info(f'пост в {CHANNEL} отправлен ({gen.__name__})')
+        _post_state['admin_warned'] = False
+        return True, gen.__name__
     except Exception as e:
         log.exception(f'post_to_channel: {e}')
+        if not _post_state['admin_warned']:
+            _post_state['admin_warned'] = True
+            await _notify_admin(bot, f'Не получилось опубликовать пост в {CHANNEL}: {e}\n\n'
+                                     'Проверь, что бот добавлен в канал администратором '
+                                     'с правом «Публикация сообщений».')
+        return False, str(e)
+
+
+async def auto_post(bot):
+    if AUTO_POSTS:
+        await post_to_channel(bot)
 
 
 async def refresh_prices(bot, slugs=None):
@@ -169,6 +250,8 @@ def setup_scheduler(bot):
     s.add_job(refresh_all_prices, IntervalTrigger(minutes=30),
               args=[bot], max_instances=1,
               next_run_time=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=1))
-    s.add_job(post_to_channel, CronTrigger(hour='10,18,22', minute=5),
+    s.add_job(auto_post, CronTrigger(hour='10,18,22', minute=5),
+              args=[bot], max_instances=1)
+    s.add_job(publish_scheduled, IntervalTrigger(seconds=30),
               args=[bot], max_instances=1)
     return s
